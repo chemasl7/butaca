@@ -52,7 +52,12 @@ const ROOM: Record<string, { tags: string[]; base: number; label: string }> = {
   family: { tags: ["family", "animation", "whimsical", "feel-good", "nature", "cozy"], base: 0.2, label: "Safe for the whole family" },
 };
 
-type Relax = { time?: boolean; svc?: boolean; format?: boolean };
+type Relax = { time?: boolean; svc?: boolean; format?: boolean; mood?: boolean };
+
+function moodHits(t: Title, moods: string[]) {
+  const f = new Set([...t.tags, ...t.genres]);
+  return moods.filter((m) => MOODS[m].tags.some((x) => f.has(x)) || MOODS[m].g.some((g) => f.has(g)));
+}
 
 function fits(t: Title, a: Answers, rel: Relax) {
   if (!rel.format && a.format && a.format !== "any" && t.type !== a.format) return false;
@@ -110,12 +115,21 @@ export default function Quiz({ catalog }: { catalog: Catalog }) {
   }, [catalog]);
 
   const { ranked, relaxed } = useMemo(() => {
+    // Loosen time, then services, then format until something matches. The mood matters most,
+    // so we keep loosening until at least one title actually fits the mood.
     const tries: Relax[] = [{}, { time: true }, { time: true, svc: true }, { time: true, svc: true, format: true }];
+    let fallback: { ranked: { t: Title; s: number }[]; relaxed: Relax } | null = null;
     for (const rel of tries) {
       const list = catalog.titles.filter((t) => fits(t, ans, rel)).map((t) => ({ t, s: score(t, ans) })).sort((a, b) => b.s - a.s);
-      if (list.length) return { ranked: list.slice(0, 10), relaxed: rel };
+      if (!list.length) continue;
+      const moodOk = !ans.mood.length || list.some((x) => moodHits(x.t, ans.mood).length);
+      if (moodOk) {
+        const withMood = ans.mood.length ? list.filter((x) => moodHits(x.t, ans.mood).length) : list;
+        return { ranked: withMood.slice(0, 10), relaxed: rel };
+      }
+      fallback ??= { ranked: list.slice(0, 10), relaxed: { ...rel, mood: true } };
     }
-    return { ranked: [] as { t: Title; s: number }[], relaxed: {} as Relax };
+    return fallback ?? { ranked: [] as { t: Title; s: number }[], relaxed: {} as Relax };
   }, [catalog, ans]);
 
   const q = QUESTIONS[step];
@@ -290,7 +304,7 @@ export default function Quiz({ catalog }: { catalog: Catalog }) {
     const checks: string[] = [];
     const hit = ans.mood.filter((m) => MOODS[m].tags.some((x) => f.has(x)) || MOODS[m].g.some((g) => f.has(g)));
     if (hit.length) checks.push(`${hit.map((m) => MOODS[m].label).join(" and ")}, like you asked`);
-    if (!relaxed.time) {
+    if (!relaxed.time || fits(t, ans, { svc: true, format: true })) {
       if (ans.time === "short") checks.push(t.type === "series" ? `Short episodes, about ${t.runtime} min each` : `Fits your evening at ${runtimeLabel(t)}`);
       if (ans.time === "mid") checks.push(t.type === "series" ? `Two episodes in about ${t.runtime * 2} min` : `Fits your evening at ${runtimeLabel(t)}`);
       if (ans.time === "long") checks.push(t.type === "series" ? "Perfect for a binge" : `A proper night in at ${runtimeLabel(t)}`);
@@ -303,8 +317,9 @@ export default function Quiz({ catalog }: { catalog: Catalog }) {
     if (on.length) checks.push(`On ${on.map(serviceLabel).join(" and ")}, which you already have`);
     const warns: string[] = [];
     if (relaxed.svc && !on.length) warns.push(`Not on your services. It's on ${t.providers.map(serviceLabel).join(", ")}`);
-    if (relaxed.time) warns.push("A bit longer than you wanted. Nothing shorter matched");
-    if (relaxed.format) warns.push("A different format than you picked. Nothing else matched");
+    if (relaxed.time && !fits(t, ans, { svc: true, format: true })) warns.push("A bit longer than you wanted. Nothing shorter matched");
+    if (relaxed.format && ans.format !== "any" && t.type !== ans.format) warns.push("A different format than you picked. Nothing else matched");
+    if (relaxed.mood) warns.push("Nothing we track matched your mood, so this is the best overall fit");
     const alts = ranked.map((r, i) => ({ ...r, i })).filter((r) => r.i !== shown).slice(0, 3);
     const labels = [
       QUESTIONS[0].opts!.find((o) => o.v === ans.who)?.b, QUESTIONS[1].opts!.find((o) => o.v === ans.format)?.b,
